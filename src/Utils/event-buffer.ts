@@ -186,8 +186,8 @@ export const makeEventBuffer = (logger: ILogger): BaileysBufferableEventEmitter 
 			}
 
 			if (isBuffering && BUFFERABLE_EVENT_SET.has(event)) {
-				append(data, historyCache, event as BufferableEvent, evData, logger)
-				return true
+				// append(data, historyCache, event as BufferableEvent, evData, logger)
+				// return true
 			}
 
 			return ev.emit('event', { [event]: evData })
