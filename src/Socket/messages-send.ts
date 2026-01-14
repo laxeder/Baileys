@@ -1,4 +1,5 @@
 import NodeCache from '@cacheable/node-cache'
+import { randomBytes } from 'crypto'
 import { Boom } from '@hapi/boom'
 import { proto } from '../../WAProto/index.js'
 import { DEFAULT_CACHE_TTLS, WA_DEFAULT_EPHEMERAL } from '../Defaults'
@@ -25,17 +26,18 @@ import {
 	generateMessageIDV2,
 	generateParticipantHashV2,
 	generateWAMessage,
-	getContentType,
 	getStatusCodeForMediaRetry,
 	getUrlFromDirectPath,
 	getWAUploadToServer,
 	MessageRetryManager,
 	normalizeMessageContent,
+	patchMessageForMdIfRequired,
 	parseAndInjectE2ESessions,
 	unixTimestampSeconds
 } from '../Utils'
 import { getUrlInfo } from '../Utils/link-preview'
 import { makeKeyedMutex } from '../Utils/make-mutex'
+import { getMessageReportingToken, shouldIncludeReportingToken } from '../Utils/reporting-utils'
 import {
 	areJidsSameUser,
 	type BinaryNode,
@@ -557,7 +559,39 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		)
 
 		const nodes = (await Promise.all(encryptionPromises)).filter(node => node !== null) as BinaryNode[]
+
+		if (recipientJids.length > 0 && nodes.length === 0) {
+			throw new Boom('All encryptions failed', { statusCode: 500 })
+		}
+
 		return { nodes, shouldIncludeDeviceIdentity }
+	}
+
+	const createButtonNode = (message: proto.IMessage) => {
+		if (message.listMessage) {
+			return [
+				{
+					tag: 'list',
+					attrs: { type: 'product_list', v: '2' }
+				}
+			]
+		}
+
+		if (
+			message.buttonsMessage ||
+			message.interactiveMessage?.nativeFlowMessage ||
+			message.interactiveMessage?.carouselMessage
+		) {
+			return [
+				{
+					tag: 'interactive',
+					attrs: { type: 'native_flow', v: '1' },
+					content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }]
+				}
+			]
+		}
+
+		return null
 	}
 
 	const relayMessage = async (
@@ -595,6 +629,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		const destinationJid = !isStatus ? finalJid : statusJid
 		const binaryNodeContent: BinaryNode[] = []
 		const devices: DeviceWithJid[] = []
+		let reportingMessage: proto.IMessage | undefined
+		let reportingTokenAdded = false
 
 		const meMsg: proto.IMessage = {
 			deviceSentMessage: {
@@ -705,6 +741,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				}
 
 				const bytes = encodeWAMessage(patched)
+				reportingMessage = patched
 				const groupAddressingMode = additionalAttributes?.['addressing_mode'] || groupData?.addressingMode || 'lid'
 				const groupSenderIdentity = groupAddressingMode === 'lid' && meLid ? meLid : meId
 
@@ -769,6 +806,12 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				}
 
 				const { user: ownUser } = jidDecode(ownId)!
+				if (!participant) {
+					const patchedForReporting = await patchMessageBeforeSending(message, [jid])
+					reportingMessage = Array.isArray(patchedForReporting)
+						? patchedForReporting.find(item => item.recipientJid === jid) || patchedForReporting[0]
+						: patchedForReporting
+				}
 
 				if (!isRetryResend) {
 					const targetUserServer = isLid ? 'lid' : 's.whatsapp.net'
@@ -941,6 +984,38 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				logger.debug({ jid }, 'adding device identity')
 			}
 
+			if (reportingMessage && shouldIncludeReportingToken(reportingMessage)) {
+				reportingMessage.messageContextInfo = reportingMessage.messageContextInfo || {}
+				if (!reportingMessage.messageContextInfo.messageSecret) {
+					reportingMessage.messageContextInfo.messageSecret = randomBytes(32)
+				}
+			}
+
+			if (
+				!isNewsletter &&
+				!isRetryResend &&
+				reportingMessage?.messageContextInfo?.messageSecret &&
+				shouldIncludeReportingToken(reportingMessage)
+			) {
+				try {
+					const encoded = encodeWAMessage(reportingMessage)
+					const reportingKey: WAMessageKey = {
+						id: msgId,
+						fromMe: true,
+						remoteJid: destinationJid,
+						participant: participant?.jid
+					}
+					const reportingNode = await getMessageReportingToken(encoded, reportingMessage, reportingKey)
+					if (reportingNode) {
+						;(stanza.content as BinaryNode[]).push(reportingNode)
+						logger.trace({ jid }, 'added reporting token to message')
+						reportingTokenAdded = true
+					}
+				} catch (error: any) {
+					logger.warn({ jid, trace: error?.stack }, 'failed to attach reporting token')
+				}
+			}
+
 			const contactTcTokenData =
 				!isGroup && !isRetryResend && !isStatus ? await authState.keys.get('tctoken', [destinationJid]) : {}
 
@@ -958,57 +1033,27 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				;(stanza.content as BinaryNode[]).push(...additionalNodes)
 			}
 
-			const content = normalizeMessageContent(message)!
-			const contentType = getContentType(content)!
+			const innerMessage = message.documentWithCaptionMessage?.message || message
+			const buttonContent = createButtonNode(innerMessage)
+			if (buttonContent) {
+				;(stanza.content as BinaryNode[]).push({
+					tag: 'biz',
+					attrs: {},
+					content: buttonContent
+				})
+				logger.debug({ jid }, 'adding biz node for buttons message')
+			}
 
-			if (
-				isJidGroup(jid) ||
-				isPnUser(jid) ||
-				(isLidUser(jid) &&
-					(contentType === 'interactiveMessage' || contentType === 'buttonsMessage' || contentType === 'listMessage'))
-			) {
-				const bizNode: BinaryNode = { tag: 'biz', attrs: {} }
-
-				if (
-					message?.viewOnceMessage?.message?.interactiveMessage ||
-					message?.viewOnceMessageV2?.message?.interactiveMessage ||
-					message?.viewOnceMessageV2Extension?.message?.interactiveMessage ||
-					message?.interactiveMessage ||
-					message?.viewOnceMessage?.message?.buttonsMessage ||
-					message?.viewOnceMessageV2?.message?.buttonsMessage ||
-					message?.viewOnceMessageV2Extension?.message?.buttonsMessage ||
-					message?.buttonsMessage ||
-					message?.documentWithCaptionMessage?.message?.interactiveMessage
-				) {
-					bizNode.content = [
-						{
-							tag: 'interactive',
-							attrs: {
-								type: 'native_flow',
-								v: '1'
-							},
-							content: [
-								{
-									tag: 'native_flow',
-									attrs: { v: '9', name: 'mixed' }
-								}
-							]
-						}
-					]
-				} else if (message?.listMessage) {
-					// list message only support in private chat
-					bizNode.content = [
-						{
-							tag: 'list',
-							attrs: {
-								type: 'product_list',
-								v: '2'
-							}
-						}
-					]
-				}
-
-				;(stanza.content as BinaryNode[]).push(bizNode)
+			if (innerMessage.buttonsMessage || innerMessage.listMessage || innerMessage.interactiveMessage) {
+				logger.debug(
+					{
+						jid,
+						msgId,
+						hasMessageContextInfo: !!innerMessage.messageContextInfo,
+						reportingTokenAdded
+					},
+					'interactive/list/buttons send context'
+				)
 			}
 
 			logger.debug({ msgId }, `sending message to ${participants.length} devices`)
@@ -1025,7 +1070,40 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 	}
 
 	const getMessageType = (message: proto.IMessage) => {
-		if (message.pollCreationMessage || message.pollCreationMessageV2 || message.pollCreationMessageV3) {
+		if (message.viewOnceMessage?.message) {
+			return getMessageType(message.viewOnceMessage.message)
+		}
+
+		if (message.viewOnceMessageV2?.message) {
+			return getMessageType(message.viewOnceMessageV2.message)
+		}
+
+		if (message.viewOnceMessageV2Extension?.message) {
+			return getMessageType(message.viewOnceMessageV2Extension.message)
+		}
+
+		if (message.lottieStickerMessage?.message) {
+			return getMessageType(message.lottieStickerMessage.message)
+		}
+
+		if (message.ephemeralMessage?.message) {
+			return getMessageType(message.ephemeralMessage.message)
+		}
+
+		if (message.documentWithCaptionMessage?.message) {
+			return getMessageType(message.documentWithCaptionMessage.message)
+		}
+
+		if (message.reactionMessage || message.encReactionMessage) {
+			return 'reaction'
+		}
+
+		if (
+			message.pollCreationMessage ||
+			message.pollCreationMessageV2 ||
+			message.pollCreationMessageV3 ||
+			message.pollUpdateMessage
+		) {
 			return 'poll'
 		}
 
@@ -1059,6 +1137,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			return 'sticker'
 		} else if (message.listMessage) {
 			return 'list'
+		} else if (message.buttonsMessage) {
+			return 'buttons'
 		} else if (message.listResponseMessage) {
 			return 'list_response'
 		} else if (message.buttonsResponseMessage) {
@@ -1209,6 +1289,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					messageId: generateMessageIDV2(sock.user?.id),
 					...options
 				})
+				fullMsg.message = patchMessageForMdIfRequired(fullMsg.message!)
 				const isEventMsg = 'event' in content && !!content.event
 				const isDeleteMsg = 'delete' in content && !!content.delete
 				const isEditMsg = 'edit' in content && !!content.edit

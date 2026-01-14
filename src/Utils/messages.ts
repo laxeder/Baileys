@@ -40,6 +40,7 @@ import {
 	getRawMediaUploadData,
 	type MediaDownloadOptions
 } from './messages-media'
+import { shouldIncludeReportingSecret } from './reporting-utils'
 
 type MediaUploadData = {
 	media: WAMediaUpload
@@ -73,6 +74,8 @@ const MessageTypeProto = {
 	sticker: WAProto.Message.StickerMessage,
 	document: WAProto.Message.DocumentMessage
 } as const
+
+const ButtonType = proto.Message.ButtonsMessage.HeaderType
 
 /**
  * Uses a regex to test whether the string contains a URL, and returns the URL if it does.
@@ -371,6 +374,29 @@ export const generateWAMessageContent = async (
 	options: MessageContentGenerationOptions
 ) => {
 	let m: WAMessageContent = {}
+	const normalizeCarouselCardMedia = async (card: proto.Message.IInteractiveMessage) => {
+		const header = card?.header as any | undefined
+		if (!header) {
+			return card
+		}
+
+		const hasImage = !!header.imageMessage?.url
+		const hasVideo = !!header.videoMessage?.url
+		const hasDocument = !!header.documentMessage?.url
+		if (!hasImage && !hasVideo && !hasDocument) {
+			return card
+		}
+
+		const mediaMessage = hasImage
+			? { image: { url: header.imageMessage!.url! } }
+			: hasVideo
+				? { video: { url: header.videoMessage!.url! } }
+				: { document: { url: header.documentMessage!.url! }, fileName: header.documentMessage?.fileName }
+
+		const prepared = await prepareWAMessageMedia(mediaMessage as any, options)
+		const nextHeader = { ...header, ...prepared }
+		return { ...card, header: nextHeader }
+	}
 	if ('text' in message) {
 		const extContent = { text: message.text } as WATextMessage
 
@@ -487,6 +513,19 @@ export const generateWAMessageContent = async (
 				}
 				break
 		}
+	} else if ('interactiveMessage' in message) {
+		let interactive = message.interactiveMessage
+		if (interactive?.carouselMessage?.cards?.length) {
+			const cards = await Promise.all(interactive.carouselMessage.cards.map(normalizeCarouselCardMedia))
+			interactive = {
+				...interactive,
+				carouselMessage: {
+					...interactive.carouselMessage,
+					cards
+				}
+			}
+		}
+		m.interactiveMessage = interactive
 	} else if ('ptv' in message && message.ptv) {
 		const { videoMessage } = await prepareWAMessageMedia({ video: message.video }, options)
 		m.ptvMessage = videoMessage
@@ -580,6 +619,83 @@ export const generateWAMessageContent = async (
 		m = await prepareWAMessageMedia(message, options)
 	}
 
+	if ('buttons' in message && !!message.buttons) {
+		const buttonsMessage: proto.Message.IButtonsMessage = {
+			buttons: message.buttons.map(b => ({
+				...b,
+				type: proto.Message.ButtonsMessage.Button.Type.RESPONSE
+			}))
+		}
+
+		if ('text' in message) {
+			buttonsMessage.contentText = message.text
+			buttonsMessage.headerType = ButtonType.EMPTY
+		} else {
+			if ('caption' in message) {
+				buttonsMessage.contentText = message.caption
+			}
+
+			const rawHeaderType = Object.keys(m)[0]!.replace('Message', '').toUpperCase()
+			const normalizedHeaderType = rawHeaderType === 'PTV' ? 'VIDEO' : rawHeaderType
+			buttonsMessage.headerType = (ButtonType as any)[normalizedHeaderType]
+
+			Object.assign(buttonsMessage, m)
+		}
+
+		if ('footer' in message && !!message.footer) {
+			buttonsMessage.footerText = message.footer
+		}
+
+		m = { buttonsMessage }
+	} else if ('templateButtons' in message && !!message.templateButtons) {
+		const template: proto.Message.TemplateMessage.IHydratedFourRowTemplate = {
+			hydratedButtons: message.templateButtons
+		}
+
+		if ('text' in message) {
+			template.hydratedContentText = message.text
+		} else {
+			if ('caption' in message) {
+				template.hydratedContentText = message.caption
+			}
+
+			Object.assign(template, m)
+		}
+
+		if ('footer' in message && !!message.footer) {
+			template.hydratedFooterText = message.footer
+		}
+
+		m = {
+			templateMessage: {
+				fourRowTemplate: template,
+				hydratedTemplate: template
+			}
+		}
+	}
+
+	if ('sections' in message && !!message.sections) {
+		const sections = message.sections.map(section => ({
+			title: section.title,
+			rows: section.rows?.map(row => ({
+				title: row.title,
+				description: row.description,
+				rowId: (row as { rowId?: string; id?: string }).rowId || (row as { id?: string }).id || ''
+			}))
+		}))
+
+		const listMessage: proto.Message.IListMessage = {
+			sections,
+			buttonText: message.buttonText,
+			title: message.title,
+			footerText: message.footer,
+			description: (message as { text?: string }).text,
+			listType: proto.Message.ListMessage.ListType.SINGLE_SELECT
+		}
+
+		m = { listMessage }
+	}
+
 	if ('viewOnce' in message && !!message.viewOnce) {
 		m = { viewOnceMessage: { message: m } }
 	}
@@ -614,6 +730,13 @@ export const generateWAMessageContent = async (
 			key.contextInfo = { ...key.contextInfo, ...message.contextInfo }
 		} else if (key!) {
 			key.contextInfo = message.contextInfo
+		}
+	}
+
+	if (shouldIncludeReportingSecret(m)) {
+		m.messageContextInfo = m.messageContextInfo || {}
+		if (!m.messageContextInfo.messageSecret) {
+			m.messageContextInfo.messageSecret = randomBytes(32)
 		}
 	}
 
@@ -741,6 +864,10 @@ export const normalizeMessageContent = (content: WAMessageContent | null | undef
 		content = inner.message
 	}
 
+	if (content) {
+		normalizeInteractiveResponseMessage(content)
+	}
+
 	return content!
 
 	function getFutureProofMessage(message: typeof content) {
@@ -752,6 +879,58 @@ export const normalizeMessageContent = (content: WAMessageContent | null | undef
 			message?.viewOnceMessageV2Extension ||
 			message?.editedMessage
 		)
+	}
+}
+
+const normalizeInteractiveResponseMessage = (content: WAMessageContent | undefined) => {
+	const interactive = content?.interactiveResponseMessage?.nativeFlowResponseMessage
+	if (!interactive?.paramsJson) {
+		return
+	}
+
+	let params: Record<string, unknown> | undefined
+	try {
+		params = JSON.parse(interactive.paramsJson)
+	} catch {
+		return
+	}
+
+	if (!params || typeof params !== 'object') {
+		return
+	}
+
+	const id =
+		params.id ||
+		params.button_id ||
+		params.selected_row_id ||
+		params.row_id ||
+		params.selection_id ||
+		params.list_reply_id
+	const title = params.title || params.display_text || params.text
+	const description = params.description
+	const name = (interactive.name || '').toLowerCase()
+	const isList = name.includes('list') || name.includes('single_select') || !!params.row_id || !!params.selected_row_id
+	const isButton = name.includes('quick_reply') || name.includes('button') || !!params.button_id || !!params.id
+
+	if (isList && !content?.listResponseMessage && id && content) {
+		content.listResponseMessage = {
+			listType: proto.Message.ListResponseMessage.ListType.SINGLE_SELECT,
+			singleSelectReply: { selectedRowId: String(id) }
+		}
+		if (title) {
+			content.listResponseMessage.title = String(title)
+		}
+		if (description) {
+			content.listResponseMessage.description = String(description)
+		}
+	}
+
+	if (isButton && !content?.buttonsResponseMessage && id && content) {
+		content.buttonsResponseMessage = {
+			selectedButtonId: String(id),
+			type: proto.Message.ButtonsResponseMessage.Type.DISPLAY_TEXT,
+			selectedDisplayText: title ? String(title) : ''
+		}
 	}
 }
 
@@ -1059,4 +1238,26 @@ export const assertMediaContent = (content: proto.IMessage | null | undefined) =
 	}
 
 	return mediaContent
+}
+
+/**
+ * Patch certain message types that are not rendered by default on MD
+ * WhatsApp Web still expects the wrapped payload for buttons & list.
+ */
+export const patchMessageForMdIfRequired = (message: proto.IMessage) => {
+	const requiresPatch = !!(message.buttonsMessage || message.listMessage || message.interactiveMessage)
+	if (requiresPatch) {
+		const messageContextInfo = message.messageContextInfo
+		const shouldHoistContext = !message.listMessage
+		message = {
+			...(shouldHoistContext && messageContextInfo ? { messageContextInfo } : {}),
+			documentWithCaptionMessage: {
+				message: {
+					...message
+				}
+			}
+		}
+	}
+
+	return message
 }
