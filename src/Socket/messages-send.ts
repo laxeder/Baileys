@@ -560,10 +560,6 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 
 		const nodes = (await Promise.all(encryptionPromises)).filter(node => node !== null) as BinaryNode[]
 
-		if (recipientJids.length > 0 && nodes.length === 0) {
-			throw new Boom('All encryptions failed', { statusCode: 500 })
-		}
-
 		return { nodes, shouldIncludeDeviceIdentity }
 	}
 
