@@ -977,7 +977,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					message?.viewOnceMessage?.message?.buttonsMessage ||
 					message?.viewOnceMessageV2?.message?.buttonsMessage ||
 					message?.viewOnceMessageV2Extension?.message?.buttonsMessage ||
-					message?.buttonsMessage
+					message?.buttonsMessage ||
+					message?.documentWithCaptionMessage?.message?.interactiveMessage
 				) {
 					bizNode.content = [
 						{
