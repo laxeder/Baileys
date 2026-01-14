@@ -1289,7 +1289,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					messageId: generateMessageIDV2(sock.user?.id),
 					...options
 				})
-				fullMsg.message = patchMessageForMdIfRequired(fullMsg.message!)
+				// fullMsg.message = patchMessageForMdIfRequired(fullMsg.message!)
 				const isEventMsg = 'event' in content && !!content.event
 				const isDeleteMsg = 'delete' in content && !!content.delete
 				const isEditMsg = 'edit' in content && !!content.edit
