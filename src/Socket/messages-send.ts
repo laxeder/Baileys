@@ -665,7 +665,6 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		const binaryNodeContent: BinaryNode[] = []
 		const devices: DeviceWithJid[] = []
 		let reportingMessage: proto.IMessage | undefined
-		let reportingTokenAdded = false
 
 		const meMsg: proto.IMessage = {
 			deviceSentMessage: {
@@ -1044,7 +1043,6 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					if (reportingNode) {
 						;(stanza.content as BinaryNode[]).push(reportingNode)
 						logger.trace({ jid }, 'added reporting token to message')
-						reportingTokenAdded = true
 					}
 				} catch (error: any) {
 					logger.warn({ jid, trace: error?.stack }, 'failed to attach reporting token')
@@ -1084,8 +1082,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 					{
 						jid,
 						msgId,
-						hasMessageContextInfo: !!innerMessage.messageContextInfo,
-						reportingTokenAdded
+						hasMessageContextInfo: !!innerMessage.messageContextInfo
 					},
 					'interactive/list/buttons send context'
 				)
