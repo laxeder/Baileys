@@ -1018,13 +1018,6 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				logger.debug({ jid }, 'adding device identity')
 			}
 
-			if (reportingMessage && shouldIncludeReportingToken(reportingMessage)) {
-				reportingMessage.messageContextInfo = reportingMessage.messageContextInfo || {}
-				if (!reportingMessage.messageContextInfo.messageSecret) {
-					reportingMessage.messageContextInfo.messageSecret = randomBytes(32)
-				}
-			}
-
 			if (
 				!isNewsletter &&
 				!isRetryResend &&
