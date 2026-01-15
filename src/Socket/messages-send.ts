@@ -386,6 +386,36 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		return deviceResults
 	}
 
+	/**
+	 * Update Member Label
+	 */
+	const updateMemberLabel = (jid: string, memberLabel: string) => {
+		return relayMessage(
+			jid,
+			{
+				protocolMessage: {
+					type: proto.Message.ProtocolMessage.Type.GROUP_MEMBER_LABEL_CHANGE,
+					memberLabel: {
+						label: memberLabel?.slice(0, 30),
+						labelTimestamp: unixTimestampSeconds()
+					}
+				}
+			},
+			{
+				additionalNodes: [
+					{
+						tag: 'meta',
+						attrs: {
+							tag_reason: 'user_update',
+							appdata: 'member_tag'
+						},
+						content: undefined
+					}
+				]
+			}
+		)
+	}
+
 	const assertSessions = async (jids: string[], force?: boolean) => {
 		let didFetchNewSession = false
 		const uniqueJids = [...new Set(jids)] // Deduplicate JIDs
@@ -513,52 +543,61 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 
 		const encryptionPromises = (patchedMessages as any).map(
 			async ({ recipientJid: jid, message: patchedMessage }: any) => {
-				if (!jid) return null
-				let msgToEncrypt = patchedMessage
-				if (dsmMessage) {
-					const { user: targetUser } = jidDecode(jid)!
-					const { user: ownPnUser } = jidDecode(meId)!
-					const ownLidUser = meLidUser
-					const isOwnUser = targetUser === ownPnUser || (ownLidUser && targetUser === ownLidUser)
-					const isExactSenderDevice = jid === meId || (meLid && jid === meLid)
-					if (isOwnUser && !isExactSenderDevice) {
-						msgToEncrypt = dsmMessage
-						logger.debug({ jid, targetUser }, 'Using DSM for own device')
-					}
-				}
+				try {
+					if (!jid) return null
 
-				const bytes = encodeWAMessage(msgToEncrypt)
-				const mutexKey = jid
-				const node = await encryptionMutex.mutex(mutexKey, async () => {
-					const { type, ciphertext } = await signalRepository.encryptMessage({
-						jid,
-						data: bytes
+					let msgToEncrypt = patchedMessage
+
+					if (dsmMessage) {
+						const { user: targetUser } = jidDecode(jid)!
+						const { user: ownPnUser } = jidDecode(meId)!
+						const ownLidUser = meLidUser
+
+						const isOwnUser = targetUser === ownPnUser || (ownLidUser && targetUser === ownLidUser)
+						const isExactSenderDevice = jid === meId || (meLid && jid === meLid)
+
+						if (isOwnUser && !isExactSenderDevice) {
+							msgToEncrypt = dsmMessage
+							logger.debug({ jid, targetUser }, 'Using DSM for own device')
+						}
+					}
+
+					const bytes = encodeWAMessage(msgToEncrypt)
+					const mutexKey = jid
+
+					const node = await encryptionMutex.mutex(mutexKey, async () => {
+						const { type, ciphertext } = await signalRepository.encryptMessage({ jid, data: bytes })
+
+						if (type === 'pkmsg') {
+							shouldIncludeDeviceIdentity = true
+						}
+
+						return {
+							tag: 'to',
+							attrs: { jid },
+							content: [
+								{
+									tag: 'enc',
+									attrs: { v: '2', type, ...(extraAttrs || {}) },
+									content: ciphertext
+								}
+							]
+						}
 					})
-					if (type === 'pkmsg') {
-						shouldIncludeDeviceIdentity = true
-					}
 
-					return {
-						tag: 'to',
-						attrs: { jid },
-						content: [
-							{
-								tag: 'enc',
-								attrs: {
-									v: '2',
-									type,
-									...(extraAttrs || {})
-								},
-								content: ciphertext
-							}
-						]
-					}
-				})
-				return node
+					return node
+				} catch (err) {
+					logger.error({ jid, err }, 'Failed to encrypt for recipient')
+					return null
+				}
 			}
 		)
 
 		const nodes = (await Promise.all(encryptionPromises)).filter(node => node !== null) as BinaryNode[]
+
+		if (recipientJids.length > 0 && nodes.length === 0) {
+			throw new Boom('All encryptions failed', { statusCode: 500 })
+		}
 
 		return { nodes, shouldIncludeDeviceIdentity }
 	}
@@ -1199,6 +1238,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		createParticipantNodes,
 		getUSyncDevices,
 		messageRetryManager,
+		updateMemberLabel,
 		updateMediaMessage: async (message: WAMessage) => {
 			const content = assertMediaContent(message.message)
 			const mediaKey = content.mediaKey!

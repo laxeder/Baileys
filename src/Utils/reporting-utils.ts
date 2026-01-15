@@ -31,9 +31,7 @@ const reportingFields: ReportingField[] = [
 	{ f: 18, s: [{ f: 6 }, { f: 16 }, { f: 17, s: [{ f: 21 }, { f: 22 }] }] },
 	{ f: 26, s: [{ f: 4 }, { f: 5 }, { f: 8 }, { f: 13 }, { f: 17, s: [{ f: 21 }, { f: 22 }] }] },
 	{ f: 28, s: [{ f: 1 }, { f: 2 }, { f: 4 }, { f: 5 }, { f: 6 }, { f: 7, s: [{ f: 21 }, { f: 22 }] }] },
-	{ f: 36 },
 	{ f: 37, s: [{ f: 1, m: true }] },
-	{ f: 45 },
 	{
 		f: 49,
 		s: [
@@ -43,7 +41,7 @@ const reportingFields: ReportingField[] = [
 			{ f: 8, s: [{ f: 1 }, { f: 2 }] }
 		]
 	},
-	{ f: 53, s: [{ f: 1, s: [{ f: 36 }, { f: 42 }, { f: 45 }] }] },
+	{ f: 53, s: [{ f: 1, m: true }] },
 	{ f: 55, s: [{ f: 1, m: true }] },
 	{ f: 58, s: [{ f: 1, m: true }] },
 	{ f: 59, s: [{ f: 1, m: true }] },
@@ -98,45 +96,11 @@ const WIRE = {
 	FIXED32: 5
 } as const
 
-const shouldEnableListReporting = () => process.env.BAILEYS_ENABLE_LIST_REPORTING === '1'
-
-const getInnerMessage = (message: proto.IMessage): proto.IMessage | undefined =>
-	(message.ephemeralMessage?.message as proto.IMessage | undefined) ||
-	(message.viewOnceMessage?.message as proto.IMessage | undefined) ||
-	(message.viewOnceMessageV2?.message as proto.IMessage | undefined) ||
-	(message.viewOnceMessageV2Extension?.message as proto.IMessage | undefined) ||
-	(message.documentWithCaptionMessage?.message as proto.IMessage | undefined) ||
-	(message.editedMessage as proto.IMessage | undefined) ||
-	(message.deviceSentMessage?.message as proto.IMessage | undefined)
-
-const hasListMessage = (message: proto.IMessage): boolean => {
-	let current: proto.IMessage | undefined = message
-	for (let i = 0; i < 6 && current; i++) {
-		if (current.listMessage) {
-			return true
-		}
-
-		const inner = getInnerMessage(current)
-		if (!inner || inner === current) {
-			return false
-		}
-
-		current = inner
-	}
-
-	return false
-}
-
-const shouldIncludeReportingBase = (message: proto.IMessage): boolean =>
+export const shouldIncludeReportingToken = (message: proto.IMessage): boolean =>
 	!message.reactionMessage &&
 	!message.encReactionMessage &&
 	!message.encEventResponseMessage &&
 	!message.pollUpdateMessage
-
-export const shouldIncludeReportingSecret = (message: proto.IMessage): boolean => shouldIncludeReportingBase(message)
-
-export const shouldIncludeReportingToken = (message: proto.IMessage): boolean =>
-	shouldIncludeReportingBase(message) && (shouldEnableListReporting() || !hasListMessage(message))
 
 const generateMsgSecretKey = async (
 	modificationType: string,
@@ -359,16 +323,7 @@ export const getMessageReportingToken = async (
 
 	const reportingSecret = await generateMsgSecretKey(ENC_SECRET_REPORT_TOKEN, key.id, from, to, msgSecret)
 
-	let content = extractReportingTokenContent(msgProtobuf, compiledReportingFields)
-	if ((!content || content.length === 0) && (message as proto.IMessage).documentWithCaptionMessage?.message) {
-		const inner = (message as proto.IMessage).documentWithCaptionMessage!.message as proto.IMessage
-		const fallback = {
-			...inner,
-			messageContextInfo: message.messageContextInfo
-		} as proto.IMessage
-		const encoded = Buffer.from(proto.Message.encode(fallback).finish())
-		content = extractReportingTokenContent(encoded, compiledReportingFields)
-	}
+	const content = extractReportingTokenContent(msgProtobuf, compiledReportingFields)
 	if (!content || content.length === 0) {
 		return null
 	}
