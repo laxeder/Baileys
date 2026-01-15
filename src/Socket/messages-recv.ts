@@ -1228,6 +1228,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 						msg?.messageStubParameters?.[0] === MISSING_KEYS_ERROR_TEXT ||
 						msg.messageStubParameters?.[0] === NO_MESSAGE_FOUND_ERROR_TEXT
 					) {
+						cleanMessage(msg, authState.creds.me!.id, authState.creds.me!.lid!)
+						await upsertMessage(msg, node.attrs.offline ? 'append' : 'notify')
 						return sendMessageAck(node)
 					}
 
