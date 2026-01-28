@@ -3,7 +3,7 @@ import type { proto } from '../../WAProto/index.js'
 import type { ILogger } from './logger'
 
 /** Number of sent messages to cache in memory for handling retry receipts */
-const RECENT_MESSAGES_SIZE = 512
+const RECENT_MESSAGES_SIZE = 256
 
 const MESSAGE_KEY_SEPARATOR = '\u0000'
 
