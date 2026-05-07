@@ -1708,6 +1708,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 									{ msgId: msg.key.id, messageAge, remoteJid: msg.key.remoteJid },
 									'skipping retry for expired status message'
 								)
+								cleanMessage(msg, authState.creds.me!.id, authState.creds.me!.lid!)
+								await upsertMessage(msg, node.attrs.offline ? 'append' : 'notify')
 								acked = true
 								return sendMessageAck(node)
 							}

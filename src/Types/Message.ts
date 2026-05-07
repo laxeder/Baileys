@@ -236,12 +236,10 @@ export type AnyMediaMessageContent = (
 	  } & Contextable &
 			Buttonable &
 			Templatable)
-) & { mimetype?: string } & Editable
-	  } & Contextable)
 ) & { mimetype?: string } & Editable & {
 		/** key of the parent albumMessage to associate this media with */
 		albumParentKey?: WAMessageKey
-	}
+	} & Contextable
 
 export type ButtonReplyInfo = {
 	displayText: string
