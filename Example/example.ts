@@ -185,7 +185,7 @@ const startSock = async() => {
 			}
 
 			if (events['contacts.upsert']) {
-				logger.debug(events['message-receipt.update'])
+				logger.debug(events['contacts.upsert'])
 			}
 
 			if(events['messages.reaction']) {
